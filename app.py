@@ -1,4 +1,4 @@
-import os
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -39,6 +39,44 @@ def load_csv(filename: str) -> pd.DataFrame | None:
 def tv_symbol(ticker: str) -> str:
     # BRK-B -> BRK.B per TradingView
     return ticker.replace("-", ".")
+
+
+# =====================================================
+# CARICAMENTO PREZZI PER IL QUICK CHART
+# 1) yfinance .history() con retry
+# 2) fallback: Stooq (EOD gratuito, niente rate limit)
+# =====================================================
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_history(ticker: str) -> pd.DataFrame | None:
+    # --- Tentativo 1: yfinance ---
+    try:
+        import yfinance as yf
+        for attempt in range(2):
+            try:
+                hist = yf.Ticker(ticker).history(period="1y", interval="1d", auto_adjust=True)
+                if hist is not None and not hist.empty:
+                    if isinstance(hist.columns, pd.MultiIndex):
+                        hist.columns = hist.columns.droplevel(1)
+                    return hist[["Open", "High", "Low", "Close"]].dropna()
+            except Exception:
+                pass
+            time.sleep(1 + attempt)
+    except Exception:
+        pass
+
+    # --- Tentativo 2: Stooq (ticker USA: aapl.us, brk-b.us) ---
+    try:
+        stooq_sym = ticker.lower() + ".us"
+        url = f"https://stooq.com/q/d/l/?s={stooq_sym}&i=d"
+        hist = pd.read_csv(url, parse_dates=["Date"], index_col="Date")
+        if hist is not None and not hist.empty and "Close" in hist.columns:
+            hist = hist[["Open", "High", "Low", "Close"]].dropna()
+            return hist.last("365D") if len(hist) > 0 else None
+    except Exception:
+        pass
+
+    return None
 
 
 # ================= SIDEBAR =================
@@ -133,17 +171,13 @@ if len(fdf) > 0:
     sel = st.selectbox("Ticker", fdf["Ticker"].tolist())
 
     if st.button("Carica grafico", type="primary"):
-        import yfinance as yf
-
         with st.spinner(f"Scarico {sel}..."):
-            hist = yf.download(sel, period="1y", interval="1d", auto_adjust=True, progress=False)
+            hist = fetch_history(sel)
 
         if hist is None or hist.empty:
-            st.error("Dati non disponibili per questo ticker.")
+            st.error("Dati non disponibili per questo ticker (Yahoo e Stooq non raggiungibili). "
+                     "Usa il link TradingView qui sotto.")
         else:
-            if isinstance(hist.columns, pd.MultiIndex):
-                hist.columns = hist.columns.droplevel(1)
-
             fig = go.Figure(go.Candlestick(
                 x=hist.index, open=hist["Open"], high=hist["High"],
                 low=hist["Low"], close=hist["Close"], name=sel,
@@ -151,15 +185,17 @@ if len(fdf) > 0:
 
             row = fdf[fdf["Ticker"] == sel].iloc[0]
             if pd.notna(row.get("CH_Rim")):
-                fig.add_hline(y=row["CH_Rim"], line_dash="dash", line_color="green",
+                fig.add_hline(y=float(row["CH_Rim"]), line_dash="dash", line_color="#26a69a",
                               annotation_text=f"C&H Rim {row['CH_Rim']}")
             if pd.notna(row.get("DT_Neckline")):
-                fig.add_hline(y=row["DT_Neckline"], line_dash="dash", line_color="red",
+                fig.add_hline(y=float(row["DT_Neckline"]), line_dash="dash", line_color="#ef5350",
                               annotation_text=f"DT Neckline {row['DT_Neckline']}")
 
             fig.update_layout(height=550, xaxis_rangeslider_visible=False,
                               margin=dict(l=10, r=10, t=30, b=10))
             st.plotly_chart(fig, use_container_width=True)
+            st.caption("Nota: dati EOD; se caricati da Stooq possono differire leggermente da Yahoo "
+                       "(dividend adjustment). I livelli Rim/Neckline provengono dallo screener.")
 
     st.link_button(f"Apri {sel} su TradingView ↗",
                    f"https://www.tradingview.com/chart/?symbol={tv_symbol(sel)}")
