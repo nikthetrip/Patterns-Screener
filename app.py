@@ -317,7 +317,7 @@ show = show.drop(columns=[c for c in HIDE_COLS if c in show.columns])
 
 # Fixed column order (as per reference layout); missing columns are skipped
 COL_ORDER = ["Ticker", "Best_Score", "Chart", "Timeframe", "Prezzo", "RSI", "Volume Ratio",
-             "CH_Status", "CH_Score", "CH_Bars_Since",
+             "CH_Status", "CH_Score", "CH_Bars_Since", "CH_PriorRise_%", "CH_PriorRise_ATR",
              "DT_Status", "DT_Score", "DT_Bars_Since",
              "Perf_1Y_%", "Perf_3Y_%", "Perf_5Y_%", "Run_Date"]
 ordered = [c for c in COL_ORDER if c in show.columns]
@@ -335,6 +335,12 @@ selection = st.dataframe(
         "Perf_1Y_%": st.column_config.NumberColumn("Perf 1Y %", format="%.1f"),
         "Perf_3Y_%": st.column_config.NumberColumn("Perf 3Y %", format="%.1f"),
         "Perf_5Y_%": st.column_config.NumberColumn("Perf 5Y %", format="%.1f"),
+        "CH_PriorRise_%": st.column_config.NumberColumn(
+            "Prior Rise %", format="%.1f",
+            help="Rise into the left rim over the prior 50 bars — O'Neil wants ≥30%"),
+        "CH_PriorRise_ATR": st.column_config.NumberColumn(
+            "Prior Rise ATR", format="%.1f",
+            help="Rise into the left rim in ATR multiples (index/ETF profile)"),
     },
     use_container_width=True,
     hide_index=True,
