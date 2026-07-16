@@ -40,6 +40,24 @@ def tv_symbol(ticker: str) -> str:
     return ticker.replace("-", ".")
 
 
+# Mappa exchange Yahoo -> prefisso TradingView
+_TV_EXCHANGE = {
+    "NMS": "NASDAQ", "NGM": "NASDAQ", "NCM": "NASDAQ", "NASDAQ": "NASDAQ",
+    "NYQ": "NYSE", "NYSE": "NYSE",
+    "ASE": "AMEX", "AMEX": "AMEX", "PCX": "AMEX", "PSE": "AMEX",  # NYSE Arca -> AMEX su TV
+    "BTS": "AMEX", "CBOE": "CBOE",
+}
+
+
+def tv_financials_url(ticker: str, exchange: str | None) -> str:
+    sym = tv_symbol(ticker).replace(".", "-")  # nei path /symbols/ TradingView usa il trattino
+    prefix = _TV_EXCHANGE.get(exchange or "", None)
+    if prefix:
+        return f"https://www.tradingview.com/symbols/{prefix}-{sym}/financials-income-statement/"
+    # fallback: senza prefisso TradingView risolve da solo l'exchange
+    return f"https://www.tradingview.com/symbols/{sym}/financials-income-statement/"
+
+
 # =====================================================
 # PREZZI (chart): yfinance con retry -> fallback Stooq
 # =====================================================
@@ -101,9 +119,11 @@ def _find_row(df: pd.DataFrame, names: list[str]):
 def fetch_fundamentals(ticker: str) -> dict:
     out = {
         "name": None, "sector": None, "industry": None, "summary": None,
-        "market_cap": None, "pe": None, "ps": None,
+        "market_cap": None, "pe": None, "fwd_pe": None, "ps": None,
+        "roe": None, "lt_debt": None,
         "equity_ratio": None, "earning_power": None,
         "fcf": None, "fcf_yield": None, "fcf_growth_yoy": None,
+        "exchange": None,
         "is_fund": False, "error": None,
     }
     try:
@@ -129,7 +149,10 @@ def fetch_fundamentals(ticker: str) -> dict:
         out["summary"] = info.get("longBusinessSummary")
         out["market_cap"] = info.get("marketCap")
         out["pe"] = info.get("trailingPE")
+        out["fwd_pe"] = info.get("forwardPE")
         out["ps"] = info.get("priceToSalesTrailing12Months")
+        out["roe"] = info.get("returnOnEquity")
+        out["exchange"] = info.get("exchange")
         out["is_fund"] = info.get("quoteType") in ("ETF", "MUTUALFUND")
 
         if out["is_fund"]:
@@ -157,6 +180,11 @@ def fetch_fundamentals(ticker: str) -> dict:
         assets = _find_row(bs, ["Total Assets"])
         if equity is not None and assets is not None and len(equity) > 0 and len(assets) > 0:
             out["equity_ratio"] = _safe_div(float(equity.iloc[0]), float(assets.iloc[0]))
+
+        # Long term debt (ultimo esercizio)
+        ltd = _find_row(bs, ["Long Term Debt", "Long Term Debt And Capital Lease Obligation"])
+        if ltd is not None and len(ltd) > 0 and not pd.isna(ltd.iloc[0]):
+            out["lt_debt"] = float(ltd.iloc[0])
 
         # Earning power (Graham) = EBIT / Total Assets
         ebit = _find_row(fin, ["EBIT", "Operating Income"])
@@ -270,6 +298,11 @@ show["TradingView"] = "https://www.tradingview.com/chart/?symbol=" + show["Ticke
 show["CH_Status"] = show["CH_Status"].map(STATUS_EMOJI).fillna("—")
 show["DT_Status"] = show["DT_Status"].map(STATUS_EMOJI).fillna("—")
 
+# Colonne di dettaglio pattern nascoste dalla tabella (restano nei CSV e nel chart)
+HIDE_COLS = ["CH_Rim", "CH_Depth_%", "CH_Cup_Bars", "CH_Handle_Bars", "CH_Handle_Retr_%",
+             "DT_Neckline", "DT_Diff_%", "DT_Valley_%", "DT_Sep_Bars"]
+show = show.drop(columns=[c for c in HIDE_COLS if c in show.columns])
+
 cols_front = ["Ticker", "Best_Score", "Prezzo", "RSI", "CH_Status", "CH_Score", "DT_Status", "DT_Score", "TradingView"]
 cols_rest = [c for c in show.columns if c not in cols_front]
 show = show[cols_front + cols_rest]
@@ -281,6 +314,9 @@ selection = st.dataframe(
         "Best_Score": st.column_config.ProgressColumn("Best Score", min_value=0, max_value=100, format="%d"),
         "CH_Score": st.column_config.NumberColumn("CH Score"),
         "DT_Score": st.column_config.NumberColumn("DT Score"),
+        "Perf_1Y_%": st.column_config.NumberColumn("Perf 1Y %", format="%.1f"),
+        "Perf_3Y_%": st.column_config.NumberColumn("Perf 3Y %", format="%.1f"),
+        "Perf_5Y_%": st.column_config.NumberColumn("Perf 5Y %", format="%.1f"),
     },
     use_container_width=True,
     hide_index=True,
@@ -333,24 +369,33 @@ if fund["is_fund"]:
     m2.metric("P/E (holdings)", fmt_num(fund["pe"]))
     st.caption("Strumento di tipo fondo/ETF: i fondamentali aziendali non sono applicabili.")
 else:
-    m1, m2, m3 = st.columns(3)
+    m1, m2, m3, m4 = st.columns(4)
     m1.metric("Market Cap", fmt_cap(fund["market_cap"]))
     m2.metric("P/E (trailing)", fmt_num(fund["pe"]))
-    m3.metric("P/S (ttm)", fmt_num(fund["ps"]))
+    m3.metric("P/E (forward)", fmt_num(fund["fwd_pe"]),
+              help="Prezzo / utili attesi prossimi 12 mesi (stime analisti)")
+    m4.metric("P/S (ttm)", fmt_num(fund["ps"]))
 
-    m4, m5, m6 = st.columns(3)
-    m4.metric("Equity ratio", fmt_pct(fund["equity_ratio"]),
+    m5, m6, m7, m8 = st.columns(4)
+    m5.metric("ROE", fmt_pct(fund["roe"]),
+              help="Return on Equity — utile netto / patrimonio netto")
+    m6.metric("Equity ratio", fmt_pct(fund["equity_ratio"]),
               help="Patrimonio netto / Totale attivo — solidità patrimoniale")
-    m5.metric("Earning power", fmt_pct(fund["earning_power"]),
+    m7.metric("Earning power", fmt_pct(fund["earning_power"]),
               help="EBIT / Totale attivo (Graham) — redditività del capitale investito")
-    m6.metric("FCF yield", fmt_pct(fund["fcf_yield"]),
-              help="Free Cash Flow / Market Cap")
+    m8.metric("Long term debt", fmt_cap(fund["lt_debt"]),
+              help="Debito a lungo termine (ultimo esercizio)")
 
-    m7, m8, _ = st.columns(3)
-    m7.metric("FCF growth YoY", fmt_pct(fund["fcf_growth_yoy"]),
-              delta=fmt_pct(fund["fcf_growth_yoy"]) if fund["fcf_growth_yoy"] is not None else None,
-              help="Variazione del Free Cash Flow rispetto all'esercizio precedente (n/d se il FCF precedente era negativo)")
-    m8.metric("FCF (ultimo FY)", fmt_cap(fund["fcf"]))
+    m9, m10, m11, _ = st.columns(4)
+    m9.metric("FCF yield", fmt_pct(fund["fcf_yield"]),
+              help="Free Cash Flow / Market Cap")
+    m10.metric("FCF growth YoY", fmt_pct(fund["fcf_growth_yoy"]),
+               delta=fmt_pct(fund["fcf_growth_yoy"]) if fund["fcf_growth_yoy"] is not None else None,
+               help="Variazione del Free Cash Flow rispetto all'esercizio precedente (n/d se il FCF precedente era negativo)")
+    m11.metric("FCF (ultimo FY)", fmt_cap(fund["fcf"]))
+
+st.link_button("📄 Financial statements su TradingView ↗",
+               tv_financials_url(sel, fund["exchange"]))
 
 # ================= CHART (automatica) =================
 
