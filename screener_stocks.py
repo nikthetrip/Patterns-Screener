@@ -31,7 +31,13 @@ MAX_CUP_BARS     = 200
 CENTER_BOTTOM    = True
 MIN_HANDLE_BARS  = 3
 MAX_HANDLE_BARS  = 40
-MAX_HANDLE_RETR  = 50.0
+MAX_HANDLE_RETR  = 45.0   # era 50: i borderline ~50% (tipo IFF) sono fuori canone O'Neil
+
+# Gate contesto per il C&H (allineamento al Pine: apex + prior uptrend nel rim sinistro)
+CH_USE_APEX      = True    # rim sinistro = massimo del lookback
+CH_USE_TREND     = True    # richiede rialzo minimo prima del rim sinistro
+CH_TREND_LOOKBACK = 50
+CH_TREND_RISE_PCT = 10.0
 
 PIV_LEN_DT       = 5
 PEAK_TOL_PCT     = 3.0
@@ -256,6 +262,22 @@ def detect_cup_handle(df, recent_bars=RECENT_BARS):
                 continue
             if abs(right_val - left_val) / left_val * 100 > RIM_TOL_PCT:
                 continue
+
+            # Gate contesto (come nel Pine): il rim sinistro deve chiudere
+            # un rialzo, non essere un picco isolato dopo un crollo
+            if CH_USE_APEX or CH_USE_TREND:
+                lkb = min(CH_TREND_LOOKBACK, left_idx)
+                if lkb <= 0:
+                    continue
+                prior_hi = high.iloc[left_idx - lkb:left_idx].max()
+                prior_lo = low.iloc[left_idx - lkb:left_idx].min()
+                if CH_USE_APEX and left_val < prior_hi:
+                    continue
+                if CH_USE_TREND:
+                    if prior_lo <= 0:
+                        continue
+                    if (left_val - prior_lo) / prior_lo * 100 < CH_TREND_RISE_PCT:
+                        continue
 
             segment_low  = low.iloc[left_idx:right_idx + 1]
             segment_high = high.iloc[left_idx + 1:right_idx]
