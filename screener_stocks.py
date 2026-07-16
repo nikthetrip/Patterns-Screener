@@ -165,6 +165,46 @@ def add_indicators(df):
     return df
 
 
+# ==============================================
+# PERFORMANCE PREZZO 1/3/5 ANNI
+# (download extra solo per i ticker con pattern)
+# ==============================================
+
+_perf_cache = {}
+
+def get_performance(ticker):
+    """Ritorna (perf_1y, perf_3y, perf_5y) in %, None se non calcolabile."""
+    if ticker in _perf_cache:
+        return _perf_cache[ticker]
+
+    perfs = (None, None, None)
+    try:
+        h = yf.download(ticker, period="5y", interval="1wk",
+                        auto_adjust=True, progress=False)
+        if h is not None and not h.empty:
+            if isinstance(h.columns, pd.MultiIndex):
+                h.columns = h.columns.droplevel(1)
+            close = h["Close"].dropna()
+            if len(close) > 0:
+                last = float(close.iloc[-1])
+                last_date = close.index[-1]
+
+                def perf_years(y):
+                    target = last_date - pd.DateOffset(years=y)
+                    past = close[close.index <= target]
+                    if len(past) == 0:
+                        return None
+                    base = float(past.iloc[-1])
+                    return round((last / base - 1) * 100, 1) if base > 0 else None
+
+                perfs = (perf_years(1), perf_years(3), perf_years(5))
+    except Exception:
+        pass
+
+    _perf_cache[ticker] = perfs
+    return perfs
+
+
 def pivot_highs(high, low, pivlen):
     n = len(high)
     piv = []
@@ -484,6 +524,8 @@ def run_screener(tf_name, cfg):
         ch_score = score_cup_handle(df, ch)
         dt_score = score_double_top(df, dt)
 
+        perf_1y, perf_3y, perf_5y = get_performance(ticker)
+
         row = {
             "Ticker": ticker,
             "Timeframe": tf_name,
@@ -507,6 +549,10 @@ def run_screener(tf_name, cfg):
             "DT_Valley_%": round(dt["valley_pct"], 1) if dt else None,
             "DT_Sep_Bars": dt["sep_bars"] if dt else None,
             "DT_Bars_Since": dt["bars_since"] if dt else None,
+
+            "Perf_1Y_%": perf_1y,
+            "Perf_3Y_%": perf_3y,
+            "Perf_5Y_%": perf_5y,
 
             "Best_Score": max([s for s in [ch_score, dt_score] if s is not None], default=0),
         }
