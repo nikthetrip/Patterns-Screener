@@ -33,9 +33,11 @@ MIN_HANDLE_BARS  = 3
 MAX_HANDLE_BARS  = 40
 MAX_HANDLE_RETR  = 45.0   # era 50: i borderline ~50% (tipo IFF) sono fuori canone O'Neil
 
-# Gate contesto per il C&H (allineamento al Pine: apex + prior uptrend nel rim sinistro)
-CH_USE_APEX      = True    # rim sinistro = massimo del lookback
-CH_USE_TREND     = True    # richiede rialzo minimo prima del rim sinistro
+# Contesto C&H: come nel Pine, il prior-uptrend NON è un gate di detection
+# ma un criterio informativo/di score (le cup si formano dentro correzioni,
+# quindi l'apex-check è inappropriato). Il rise viene riportato in colonna.
+CH_USE_APEX      = False
+CH_USE_TREND     = False
 CH_TREND_LOOKBACK = 50
 CH_TREND_RISE_PCT = 10.0
 
@@ -263,21 +265,19 @@ def detect_cup_handle(df, recent_bars=RECENT_BARS):
             if abs(right_val - left_val) / left_val * 100 > RIM_TOL_PCT:
                 continue
 
-            # Gate contesto (come nel Pine): il rim sinistro deve chiudere
-            # un rialzo, non essere un picco isolato dopo un crollo
-            if CH_USE_APEX or CH_USE_TREND:
-                lkb = min(CH_TREND_LOOKBACK, left_idx)
-                if lkb <= 0:
-                    continue
+            # Prior uptrend nel rim sinistro: calcolato sempre (informativo,
+            # come la riga "Prior uptrend" del BOOK CHECK Pine); gate solo se attivato
+            prior_rise_pct = None
+            lkb = min(CH_TREND_LOOKBACK, left_idx)
+            if lkb > 0:
                 prior_hi = high.iloc[left_idx - lkb:left_idx].max()
                 prior_lo = low.iloc[left_idx - lkb:left_idx].min()
+                if prior_lo > 0:
+                    prior_rise_pct = (left_val - prior_lo) / prior_lo * 100
                 if CH_USE_APEX and left_val < prior_hi:
                     continue
-                if CH_USE_TREND:
-                    if prior_lo <= 0:
-                        continue
-                    if (left_val - prior_lo) / prior_lo * 100 < CH_TREND_RISE_PCT:
-                        continue
+                if CH_USE_TREND and (prior_rise_pct is None or prior_rise_pct < CH_TREND_RISE_PCT):
+                    continue
 
             segment_low  = low.iloc[left_idx:right_idx + 1]
             segment_high = high.iloc[left_idx + 1:right_idx]
@@ -323,6 +323,7 @@ def detect_cup_handle(df, recent_bars=RECENT_BARS):
                         "bars_since": last_idx - breakout_idx,
                         "left_idx": left_idx, "right_idx": right_idx,
                         "breakout_idx": breakout_idx, "last_idx": last_idx,
+                        "prior_rise_pct": prior_rise_pct,
                     }
             elif last_close <= rim:
                 return {
@@ -332,6 +333,7 @@ def detect_cup_handle(df, recent_bars=RECENT_BARS):
                     "bars_since": handle_bars,
                     "left_idx": left_idx, "right_idx": right_idx,
                     "breakout_idx": None, "last_idx": last_idx,
+                    "prior_rise_pct": prior_rise_pct,
                 }
     return None
 
@@ -563,6 +565,7 @@ def run_screener(tf_name, cfg):
             "CH_Handle_Bars": ch["handle_bars"] if ch else None,
             "CH_Handle_Retr_%": round(ch["handle_retr_pct"], 1) if ch else None,
             "CH_Bars_Since": ch["bars_since"] if ch else None,
+            "CH_PriorRise_%": round(ch["prior_rise_pct"], 1) if (ch and ch.get("prior_rise_pct") is not None) else None,
 
             "DT_Status": dt["status"] if dt else None,
             "DT_Score": dt_score,
