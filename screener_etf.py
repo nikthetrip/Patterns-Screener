@@ -31,10 +31,10 @@ MIN_HANDLE_BARS  = 3
 MAX_HANDLE_BARS  = 40
 MAX_HANDLE_RETR  = 45.0   # era 50: i borderline ~50% sono fuori canone O'Neil
 
-# Gate contesto per il C&H (allineamento al Pine: apex + prior rise nel rim sinistro,
-# in ATR come il resto del profilo index)
-CH_USE_APEX       = True
-CH_USE_TREND      = True
+# Contesto C&H: prior-rise NON è gate di detection (vedi Pine: criterio di
+# score, non di rilevamento); riportato come colonna informativa in ATR
+CH_USE_APEX       = False
+CH_USE_TREND      = False
 CH_TREND_LOOKBACK = 50
 CH_TREND_RISE_ATR = 5.0
 
@@ -208,22 +208,20 @@ def detect_cup_handle(df):
             if abs(right_val - left_val) / left_val * 100 > RIM_TOL_PCT:
                 continue
 
-            # Gate contesto (come nel Pine): il rim sinistro deve chiudere
-            # un rialzo (in ATR, profilo index), non essere un picco isolato
-            if CH_USE_APEX or CH_USE_TREND:
-                lkb = min(CH_TREND_LOOKBACK, left_idx)
-                if lkb <= 0:
-                    continue
+            # Prior rise nel rim sinistro in multipli di ATR: informativo,
+            # gate solo se attivato
+            prior_rise_atr = None
+            lkb = min(CH_TREND_LOOKBACK, left_idx)
+            if lkb > 0:
                 atr_ref = atr.iloc[left_idx]
-                if np.isnan(atr_ref) or atr_ref <= 0:
-                    continue
                 prior_hi = high.iloc[left_idx - lkb:left_idx].max()
                 prior_lo = low.iloc[left_idx - lkb:left_idx].min()
+                if not np.isnan(atr_ref) and atr_ref > 0:
+                    prior_rise_atr = (left_val - prior_lo) / atr_ref
                 if CH_USE_APEX and left_val < prior_hi:
                     continue
-                if CH_USE_TREND:
-                    if (left_val - prior_lo) < CH_TREND_RISE_ATR * atr_ref:
-                        continue
+                if CH_USE_TREND and (prior_rise_atr is None or prior_rise_atr < CH_TREND_RISE_ATR):
+                    continue
 
             segment_low  = low.iloc[left_idx:right_idx + 1]
             segment_high = high.iloc[left_idx + 1:right_idx]
@@ -269,6 +267,7 @@ def detect_cup_handle(df):
                         "bars_since": last_idx - breakout_idx,
                         "left_idx": left_idx, "right_idx": right_idx,
                         "breakout_idx": breakout_idx, "last_idx": last_idx,
+                        "prior_rise_atr": prior_rise_atr,
                     }
             elif last_close <= rim:
                 return {
@@ -278,6 +277,7 @@ def detect_cup_handle(df):
                     "bars_since": handle_bars,
                     "left_idx": left_idx, "right_idx": right_idx,
                     "breakout_idx": None, "last_idx": last_idx,
+                    "prior_rise_atr": prior_rise_atr,
                 }
     return None
 
@@ -510,6 +510,7 @@ for ticker in tickers:
         "CH_Handle_Bars": ch["handle_bars"] if ch else None,
         "CH_Handle_Retr_%": round(ch["handle_retr_pct"], 1) if ch else None,
         "CH_Bars_Since": ch["bars_since"] if ch else None,
+        "CH_PriorRise_ATR": round(ch["prior_rise_atr"], 1) if (ch and ch.get("prior_rise_atr") is not None) else None,
 
         "DT_Status": dt["status"] if dt else None,
         "DT_Score": dt_score,
