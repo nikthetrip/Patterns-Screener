@@ -114,7 +114,7 @@ def _find_row(df: pd.DataFrame, names: list[str]):
     return None
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False)
 def fetch_fundamentals(ticker: str) -> dict:
     out = {
         "name": None, "sector": None, "industry": None, "summary": None,
@@ -302,7 +302,7 @@ def fetch_financial_history(ticker: str) -> pd.DataFrame | None:
 # ETF DATA (yfinance funds_data + info)
 # =====================================================
 
-@st.cache_data(ttl=86400, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False)
 def fetch_etf_data(ticker: str) -> dict:
     out = {
         "name": None, "summary": None, "aum": None, "pe": None,
@@ -361,6 +361,101 @@ def fetch_etf_data(ticker: str) -> dict:
             out["error"] = "data unavailable"
     except Exception as e:
         out["error"] = str(e)
+    return out
+
+
+
+# =====================================================
+# PREFETCHED DATA (written daily by the GitHub Action)
+# Primary source for fundamentals/ETF info; live yfinance
+# is only a fallback (Streamlit Cloud IPs are rate-limited)
+# =====================================================
+
+import json as _json
+
+
+@st.cache_data(ttl=1800)
+def load_prefetched(filename: str) -> pd.DataFrame | None:
+    path = DATA_DIR / filename
+    if not path.exists():
+        return None
+    try:
+        df = pd.read_csv(path)
+        if df.empty or "Ticker" not in df.columns:
+            return None
+        return df.set_index("Ticker")
+    except Exception:
+        return None
+
+
+def _row_get(row, key):
+    try:
+        v = row.get(key)
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            return None
+        return v
+    except Exception:
+        return None
+
+
+def fund_from_prefetch(ticker: str) -> dict | None:
+    table = load_prefetched("fundamentals_stocks.csv")
+    if table is None or ticker not in table.index:
+        return None
+    r = table.loc[ticker]
+    out = {
+        "name": _row_get(r, "name"), "sector": _row_get(r, "sector"),
+        "industry": _row_get(r, "industry"), "summary": _row_get(r, "summary"),
+        "market_cap": _row_get(r, "market_cap"), "pe": _row_get(r, "pe"),
+        "fwd_pe": _row_get(r, "fwd_pe"), "ps": _row_get(r, "ps"),
+        "roe": _row_get(r, "roe"), "lt_debt": _row_get(r, "lt_debt"),
+        "equity_ratio": _row_get(r, "equity_ratio"),
+        "earning_power": _row_get(r, "earning_power"),
+        "fcf": _row_get(r, "fcf"), "fcf_yield": _row_get(r, "fcf_yield"),
+        "fcf_growth_yoy": _row_get(r, "fcf_growth_yoy"),
+        "exchange": _row_get(r, "exchange"),
+        "next_earnings": _row_get(r, "next_earnings"),
+        "is_fund": False, "error": None, "fin_history": None,
+    }
+    fh = _row_get(r, "fin_history")
+    if fh:
+        try:
+            hist = pd.DataFrame(_json.loads(fh)).set_index("Year").sort_index()
+            if "Revenue" in hist.columns and "NetIncome" in hist.columns:
+                hist["NetMargin_%"] = hist["NetIncome"] / hist["Revenue"] * 100
+            out["fin_history"] = hist
+        except Exception:
+            pass
+    if out["name"] is None and out["market_cap"] is None:
+        return None  # empty prefetch row -> let live fallback try
+    return out
+
+
+def etf_from_prefetch(ticker: str) -> dict | None:
+    table = load_prefetched("etf_info.csv")
+    if table is None or ticker not in table.index:
+        return None
+    r = table.loc[ticker]
+    out = {
+        "name": _row_get(r, "name"), "summary": _row_get(r, "summary"),
+        "category": _row_get(r, "category"), "aum": _row_get(r, "aum"),
+        "pe": _row_get(r, "pe"), "expense_ratio": _row_get(r, "expense_ratio"),
+        "top_holdings": None, "sector_weights": None, "error": None,
+    }
+    th = _row_get(r, "top_holdings")
+    if th:
+        try:
+            out["top_holdings"] = pd.DataFrame(_json.loads(th))
+        except Exception:
+            pass
+    sw = _row_get(r, "sector_weights")
+    if sw:
+        try:
+            out["sector_weights"] = _json.loads(sw)
+        except Exception:
+            pass
+    if out["name"] is None and out["aum"] is None and out["top_holdings"] is None:
+        return None
     return out
 
 
@@ -510,7 +605,7 @@ IS_ETF_UNIVERSE = source_name == "Sector ETFs"
 if IS_ETF_UNIVERSE:
     # ---------------- ETF DEDICATED SECTION ----------------
     with st.spinner(f"Loading {sel} data..."):
-        etf = fetch_etf_data(sel)
+        etf = etf_from_prefetch(sel) or fetch_etf_data(sel)
 
     title_name = etf["name"] or sel
     st.subheader(f"🧺 {title_name}  ·  {sel}")
@@ -586,7 +681,7 @@ if IS_ETF_UNIVERSE:
 else:
     # ---------------- STOCK SECTION (unchanged) ----------------
     with st.spinner(f"Loading {sel} data..."):
-        fund = fetch_fundamentals(sel)
+        fund = fund_from_prefetch(sel) or fetch_fundamentals(sel)
 
     title_name = fund["name"] or sel
     st.subheader(f"🏢 {title_name}  ·  {sel}")
@@ -637,7 +732,7 @@ else:
                    tv_financials_url(sel, fund["exchange"]))
 
     # ---- Financial history charts ----
-    fh = fetch_financial_history(sel)
+    fh = fund.get("fin_history") if isinstance(fund.get("fin_history"), pd.DataFrame) else fetch_financial_history(sel)
     if fh is not None and not fh.empty:
         st.markdown("##### 📊 Financial history (annual)")
         g1, g2 = st.columns(2)
