@@ -485,7 +485,7 @@ st.sidebar.divider()
 
 min_score = st.sidebar.slider("Minimum Best Score", 0, 100, 40, step=5)
 
-all_status = ["BREAKOUT", "FORMING", "CONFIRMED", "PENDING"]
+all_status = ["BREAKOUT", "FORMING", "CONFIRMED", "PENDING", "TOUCH"]
 sel_status = st.sidebar.multiselect("Pattern status", all_status, default=all_status)
 
 pattern_type = st.sidebar.radio("Pattern type", ["All", "Cup & Handle only", "Double Top only"])
@@ -501,15 +501,16 @@ max_bars_since = st.sidebar.slider(
 
 fdf = df.copy()
 
-ch_in = fdf["CH_Status"].isin(sel_status) if "CH_Status" in fdf else False
-dt_in = fdf["DT_Status"].isin(sel_status) if "DT_Status" in fdf else False
+ch_in  = fdf["CH_Status"].isin(sel_status) if "CH_Status" in fdf else False
+dt_in  = fdf["DT_Status"].isin(sel_status) if "DT_Status" in fdf else False
+dtz_in = fdf["DTZ_Status"].isin(sel_status) if "DTZ_Status" in fdf else False
 
 if pattern_type == "Cup & Handle only":
     fdf = fdf[fdf["CH_Status"].notna() & ch_in]
 elif pattern_type == "Double Top only":
-    fdf = fdf[fdf["DT_Status"].notna() & dt_in]
+    fdf = fdf[(fdf["DT_Status"].notna() & dt_in) | dtz_in]
 else:
-    fdf = fdf[ch_in | dt_in]
+    fdf = fdf[ch_in | dt_in | dtz_in]
 
 fdf = fdf[fdf["Best_Score"] >= min_score]
 fdf = fdf[(fdf["RSI"] >= rsi_range[0]) & (fdf["RSI"] <= rsi_range[1])]
