@@ -122,7 +122,7 @@ def fetch_fundamentals(ticker: str) -> dict:
         "roe": None, "lt_debt": None,
         "equity_ratio": None, "earning_power": None,
         "fcf": None, "fcf_yield": None, "fcf_growth_yoy": None,
-        "exchange": None,
+        "exchange": None, "next_earnings": None,
         "is_fund": False, "error": None,
     }
     try:
@@ -153,6 +153,23 @@ def fetch_fundamentals(ticker: str) -> dict:
         out["roe"] = info.get("returnOnEquity")
         out["exchange"] = info.get("exchange")
         out["is_fund"] = info.get("quoteType") in ("ETF", "MUTUALFUND")
+
+        # Next earnings date
+        try:
+            cal = tk.calendar
+            ed = None
+            if isinstance(cal, dict):
+                ed = cal.get("Earnings Date")
+            elif cal is not None and hasattr(cal, "loc") and "Earnings Date" in getattr(cal, "index", []):
+                ed = cal.loc["Earnings Date"]
+            if ed is not None:
+                if isinstance(ed, (list, tuple)) and len(ed) > 0:
+                    ed = ed[0]
+                elif hasattr(ed, "iloc") and len(ed) > 0:
+                    ed = ed.iloc[0]
+                out["next_earnings"] = str(pd.Timestamp(ed).date())
+        except Exception:
+            pass
 
         if out["is_fund"]:
             out["summary"] = out["summary"] or info.get("description")
@@ -225,6 +242,60 @@ def fmt_cap(x):
     if x >= 1e9:
         return f"{x / 1e9:.1f} B$"
     return f"{x / 1e6:.0f} M$"
+
+
+# =====================================================
+# ANNUAL FINANCIAL HISTORY (yfinance statements)
+# Note: yfinance exposes ~4-5 fiscal years max
+# =====================================================
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_financial_history(ticker: str) -> pd.DataFrame | None:
+    try:
+        import yfinance as yf
+        tk = yf.Ticker(ticker)
+
+        try:
+            fin = tk.income_stmt
+        except Exception:
+            fin = None
+        try:
+            bs = tk.balance_sheet
+        except Exception:
+            bs = None
+        try:
+            cf = tk.cashflow
+        except Exception:
+            cf = None
+
+        revenue = _find_row(fin, ["Total Revenue", "Operating Revenue"])
+        net_inc = _find_row(fin, ["Net Income", "Net Income Common Stockholders"])
+        debt    = _find_row(bs, ["Total Debt", "Long Term Debt And Capital Lease Obligation", "Long Term Debt"])
+        fcf     = _find_row(cf, ["Free Cash Flow"])
+
+        if revenue is None and debt is None and fcf is None:
+            return None
+
+        frames = {}
+        for name, series in [("Revenue", revenue), ("NetIncome", net_inc),
+                             ("Debt", debt), ("FCF", fcf)]:
+            if series is not None:
+                s = series.dropna()
+                s.index = pd.to_datetime(s.index).year
+                frames[name] = s
+
+        if not frames:
+            return None
+
+        hist = pd.DataFrame(frames)
+        hist = hist[~hist.index.duplicated(keep="first")].sort_index()
+
+        if "Revenue" in hist.columns and "NetIncome" in hist.columns:
+            hist["NetMargin_%"] = hist["NetIncome"] / hist["Revenue"] * 100
+
+        return hist if not hist.empty else None
+    except Exception:
+        return None
 
 
 # ================= SIDEBAR =================
@@ -302,7 +373,13 @@ st.divider()
 
 # ================= TABLE (row selection) =================
 
-st.caption("👆 Click a row to see company info, fundamentals and chart.")
+try:
+    from datetime import datetime, timezone
+    mtime = (DATA_DIR / SOURCES[source_name]).stat().st_mtime
+    upd = datetime.fromtimestamp(mtime, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    st.caption(f"🗓️ Last update: **{run_date}** · data refreshed {upd}")
+except Exception:
+    st.caption(f"🗓️ Last update: **{run_date}**")
 
 show = fdf.copy()
 show["Chart"] = "https://www.tradingview.com/chart/?symbol=" + show["Ticker"].map(tv_symbol)
@@ -312,12 +389,12 @@ show["DT_Status"] = show["DT_Status"].map(STATUS_EMOJI).fillna("—")
 # Pattern-detail columns hidden from the table (kept in CSV and used by the chart)
 HIDE_COLS = ["CH_Rim", "CH_Depth_%", "CH_Cup_Bars", "CH_Handle_Bars", "CH_Handle_Retr_%",
              "DT_Neckline", "DT_Diff_%", "DT_Valley_%", "DT_Sep_Bars",
-             "ATR14", "ATR_%"]
+             "ATR14", "ATR_%", "CH_PriorRise_ATR"]
 show = show.drop(columns=[c for c in HIDE_COLS if c in show.columns])
 
 # Fixed column order (as per reference layout); missing columns are skipped
 COL_ORDER = ["Ticker", "Best_Score", "Chart", "Timeframe", "Prezzo", "RSI", "Volume Ratio",
-             "CH_Status", "CH_Score", "CH_Bars_Since", "CH_PriorRise_%", "CH_PriorRise_ATR",
+             "CH_Status", "CH_Score", "CH_Bars_Since", "CH_PriorRise_%",
              "DT_Status", "DT_Score", "DT_Bars_Since",
              "Perf_1Y_%", "Perf_3Y_%", "Perf_5Y_%", "Run_Date"]
 ordered = [c for c in COL_ORDER if c in show.columns]
@@ -338,9 +415,6 @@ selection = st.dataframe(
         "CH_PriorRise_%": st.column_config.NumberColumn(
             "Prior Rise %", format="%.1f",
             help="Rise into the left rim over the prior 50 bars — O'Neil wants ≥30%"),
-        "CH_PriorRise_ATR": st.column_config.NumberColumn(
-            "Prior Rise ATR", format="%.1f",
-            help="Rise into the left rim in ATR multiples (index/ETF profile)"),
     },
     use_container_width=True,
     hide_index=True,
@@ -409,16 +483,71 @@ else:
     m8.metric("Long term debt", fmt_cap(fund["lt_debt"]),
               help="Long-term debt (latest fiscal year)")
 
-    m9, m10, m11, _ = st.columns(4)
+    m9, m10, m11, m12 = st.columns(4)
     m9.metric("FCF yield", fmt_pct(fund["fcf_yield"]),
               help="Free Cash Flow / Market Cap")
     m10.metric("FCF growth YoY", fmt_pct(fund["fcf_growth_yoy"]),
                delta=fmt_pct(fund["fcf_growth_yoy"]) if fund["fcf_growth_yoy"] is not None else None,
                help="Free Cash Flow change vs previous fiscal year (n/a if prior-year FCF was negative)")
     m11.metric("FCF (latest FY)", fmt_cap(fund["fcf"]))
+    m12.metric("Next earnings", fund["next_earnings"] or "n/a",
+               help="Next scheduled earnings report date (Yahoo Finance)")
 
 st.link_button("📄 Financial statements on TradingView ↗",
                tv_financials_url(sel, fund["exchange"]))
+
+# ================= FINANCIAL HISTORY CHARTS =================
+
+if not fund["is_fund"]:
+    fh = fetch_financial_history(sel)
+    if fh is not None and not fh.empty:
+        st.markdown("##### 📊 Financial history (annual)")
+        g1, g2 = st.columns(2)
+
+        # --- Chart 1: Revenue + Net Income (bars) + Net Margin % (line) ---
+        with g1:
+            fig1 = go.Figure()
+            if "Revenue" in fh.columns:
+                fig1.add_bar(x=fh.index, y=fh["Revenue"], name="Revenue",
+                             marker_color="#5b7cfa")
+            if "NetIncome" in fh.columns:
+                fig1.add_bar(x=fh.index, y=fh["NetIncome"], name="Net income",
+                             marker_color="#4dd0e1")
+            if "NetMargin_%" in fh.columns:
+                fig1.add_scatter(x=fh.index, y=fh["NetMargin_%"], name="Net margin %",
+                                 mode="lines+markers", yaxis="y2",
+                                 line=dict(color="#f59e0b", width=2))
+            fig1.update_layout(
+                title="Growth & Profitability",
+                barmode="group", height=380,
+                yaxis=dict(title="USD"),
+                yaxis2=dict(title="%", overlaying="y", side="right", showgrid=False),
+                legend=dict(orientation="h", y=-0.25),
+                margin=dict(l=10, r=10, t=45, b=10),
+            )
+            st.plotly_chart(fig1, use_container_width=True)
+
+        # --- Chart 2: Debt + Free Cash Flow (bars) ---
+        with g2:
+            fig2 = go.Figure()
+            if "Debt" in fh.columns:
+                fig2.add_bar(x=fh.index, y=fh["Debt"], name="Debt",
+                             marker_color="#ec6a9c")
+            if "FCF" in fh.columns:
+                fig2.add_bar(x=fh.index, y=fh["FCF"], name="Free cash flow",
+                             marker_color="#26c6da")
+            fig2.update_layout(
+                title="Financial health",
+                barmode="group", height=380,
+                yaxis=dict(title="USD"),
+                legend=dict(orientation="h", y=-0.25),
+                margin=dict(l=10, r=10, t=45, b=10),
+            )
+            st.plotly_chart(fig2, use_container_width=True)
+
+        st.caption("Annual figures from Yahoo Finance statements. "
+                   "Note: free data covers only the last ~4 fiscal years, "
+                   "not the full 10-year history shown by paid providers.")
 
 # ================= CHART (automatic) =================
 
