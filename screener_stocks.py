@@ -442,6 +442,90 @@ def detect_double_top(df, recent_bars=RECENT_BARS):
     return None
 
 
+
+
+# ==============================================
+# DT ZONE TOUCH — il prezzo rientra nella fascia
+# di T1 (± tolleranza) con valle valida in mezzo:
+# potenziale T2 PRIMA della conferma del pivot.
+# Anticipa la label "T2?" del Pine (che richiede
+# pivlen barre); per costruzione e' piu' rumoroso.
+# ==============================================
+
+def detect_dt_zone_touch(df, recent_bars=1):
+    if len(df) < MIN_SEP_BARS + PIV_LEN_DT + 5:
+        return None
+
+    high = df["High"].reset_index(drop=True)
+    low  = df["Low"].reset_index(drop=True)
+    close = df["Close"].reset_index(drop=True)
+    n = len(close)
+    last_idx = n - 1
+
+    pivots = pivot_highs(high, low, PIV_LEN_DT)
+    if not pivots:
+        return None
+
+    for i in range(len(pivots) - 1, -1, -1):
+        t1_idx, t1_val = pivots[i]
+        sep_now = last_idx - t1_idx
+        if sep_now < MIN_SEP_BARS:
+            continue
+        if sep_now > MAX_SEP_BARS:
+            break
+
+        # stessi gate del DT su T1 (apex + prior uptrend)
+        if USE_APEX or USE_TREND:
+            lkb = min(TREND_LOOKBACK, t1_idx)
+            if lkb <= 0:
+                continue
+            prior_hi = high.iloc[t1_idx - lkb:t1_idx].max()
+            prior_lo = low.iloc[t1_idx - lkb:t1_idx].min()
+            if USE_APEX and t1_val < prior_hi:
+                continue
+            if USE_TREND:
+                if prior_lo <= 0:
+                    continue
+                if (t1_val - prior_lo) / prior_lo * 100 < TREND_RISE_PCT:
+                    continue
+
+        zone_lo = t1_val * (1 - PEAK_TOL_PCT / 100)
+        zone_hi = t1_val * (1 + PEAK_TOL_PCT / 100)
+
+        # invalidazione: una chiusura sopra la zona dopo T1
+        if (close.iloc[t1_idx + 1:last_idx + 1] > zone_hi).any():
+            continue
+
+        # primo tocco della zona dopo T1
+        touch_idx = None
+        for k in range(t1_idx + 1, last_idx + 1):
+            if high.iloc[k] >= zone_lo:
+                touch_idx = k
+                break
+        if touch_idx is None:
+            continue
+        if (last_idx - touch_idx) > recent_bars:
+            continue  # tocco troppo vecchio
+
+        # valle valida tra T1 e il tocco
+        mid_low = low.iloc[t1_idx + 1:touch_idx]
+        if mid_low.empty:
+            continue
+        valley = mid_low.min()
+        valley_pct = (t1_val - valley) / t1_val * 100
+        if valley_pct < MIN_VALLEY_PCT:
+            continue
+        if (touch_idx - t1_idx) < MIN_SEP_BARS:
+            continue
+
+        return {
+            "t1_val": t1_val, "zone_lo": zone_lo, "zone_hi": zone_hi,
+            "valley_pct": valley_pct, "sep_bars": touch_idx - t1_idx,
+            "bars_since_touch": last_idx - touch_idx,
+        }
+    return None
+
+
 # ==============================================
 # BOOK SCORE
 # ==============================================
@@ -665,7 +749,8 @@ def run_screener(tf_name, cfg):
 
         ch = detect_cup_handle(df, recent_bars=recent_bars)
         dt = detect_double_top(df, recent_bars=recent_bars)
-        if ch is None and dt is None:
+        dtz = detect_dt_zone_touch(df, recent_bars=1)
+        if ch is None and dt is None and dtz is None:
             continue
 
         ch_score = score_cup_handle(df, ch)
@@ -697,6 +782,12 @@ def run_screener(tf_name, cfg):
             "DT_Valley_%": round(dt["valley_pct"], 1) if dt else None,
             "DT_Sep_Bars": dt["sep_bars"] if dt else None,
             "DT_Bars_Since": dt["bars_since"] if dt else None,
+
+            "DTZ_Status": "TOUCH" if dtz else None,
+            "DTZ_T1": round(dtz["t1_val"], 2) if dtz else None,
+            "DTZ_Valley_%": round(dtz["valley_pct"], 1) if dtz else None,
+            "DTZ_Sep_Bars": dtz["sep_bars"] if dtz else None,
+            "DTZ_Bars_Since": dtz["bars_since_touch"] if dtz else None,
 
             "Perf_1Y_%": perf_1y,
             "Perf_3Y_%": perf_3y,
