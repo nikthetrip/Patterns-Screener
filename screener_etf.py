@@ -466,6 +466,68 @@ def score_double_top(df, dt):
     return round(earned * 100.0 / denom) if denom > 0 else 0
 
 
+
+
+# ==============================================
+# INFO ETF — scaricate qui (IP GitHub) e lette
+# dalla dashboard via CSV
+# ==============================================
+
+import json
+import time
+
+def fetch_etf_info_row(ticker):
+    row = {"Ticker": ticker}
+    try:
+        tk = yf.Ticker(ticker)
+        info = {}
+        for attempt in range(3):
+            try:
+                info = tk.info or {}
+                if info:
+                    break
+            except Exception:
+                time.sleep(2 * (attempt + 1))
+
+        row["name"] = info.get("longName") or info.get("shortName")
+        row["summary"] = info.get("longBusinessSummary") or info.get("description")
+        row["category"] = info.get("category")
+        row["aum"] = info.get("totalAssets")
+        row["pe"] = info.get("trailingPE")
+        er = info.get("netExpenseRatio")
+        if er is None:
+            er = info.get("annualReportExpenseRatio")
+        if er is not None:
+            row["expense_ratio"] = er / 100 if er > 0.5 else er
+
+        try:
+            fd = tk.funds_data
+            if fd is not None:
+                try:
+                    th = fd.top_holdings
+                    if th is not None and not th.empty:
+                        th10 = th.head(10).reset_index()
+                        row["top_holdings"] = th10.to_json(orient="records")
+                except Exception:
+                    pass
+                try:
+                    sw = fd.sector_weightings
+                    if sw:
+                        row["sector_weights"] = json.dumps(sw)
+                except Exception:
+                    pass
+                if not row.get("summary"):
+                    try:
+                        row["summary"] = fd.description
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return row
+
+
 # ==============================================
 # MOTORE PRINCIPALE
 # ==============================================
@@ -544,3 +606,13 @@ if not results_df.empty:
 
 results_df.to_csv("data/etf_sector.csv", index=False)
 print(f"\nSalvato data/etf_sector.csv — {len(results_df)} pattern trovati.")
+
+# --- Info ETF per i ticker con pattern ---
+if not results_df.empty:
+    info_rows = []
+    print(f"Scarico info ETF per {len(results_df)} ticker...")
+    for tkr in results_df["Ticker"].tolist():
+        info_rows.append(fetch_etf_info_row(tkr))
+        time.sleep(0.3)
+    pd.DataFrame(info_rows).to_csv("data/etf_info.csv", index=False)
+    print(f"Salvato data/etf_info.csv ({len(info_rows)} righe).")
