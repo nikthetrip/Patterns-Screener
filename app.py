@@ -21,6 +21,7 @@ STATUS_EMOJI = {
     "FORMING": "🕐 FORMING",
     "CONFIRMED": "🔻 CONFIRMED",
     "PENDING": "⏳ PENDING",
+    "TOUCH": "🎯 TOUCH",
 }
 
 
@@ -550,17 +551,21 @@ show = fdf.copy()
 show["Chart"] = "https://www.tradingview.com/chart/?symbol=" + show["Ticker"].map(tv_symbol)
 show["CH_Status"] = show["CH_Status"].map(STATUS_EMOJI).fillna("—")
 show["DT_Status"] = show["DT_Status"].map(STATUS_EMOJI).fillna("—")
+if "DTZ_Status" in show.columns:
+    show["DTZ_Status"] = show["DTZ_Status"].map(STATUS_EMOJI).fillna("—")
 
 # Pattern-detail columns hidden from the table (kept in CSV and used by the chart)
 HIDE_COLS = ["CH_Rim", "CH_Depth_%", "CH_Cup_Bars", "CH_Handle_Bars", "CH_Handle_Retr_%",
              "DT_Neckline", "DT_Diff_%", "DT_Valley_%", "DT_Sep_Bars",
-             "ATR14", "ATR_%", "CH_PriorRise_ATR"]
+             "ATR14", "ATR_%", "CH_PriorRise_ATR",
+             "DTZ_T1", "DTZ_Valley_%", "DTZ_Sep_Bars"]
 show = show.drop(columns=[c for c in HIDE_COLS if c in show.columns])
 
 # Fixed column order (as per reference layout); missing columns are skipped
 COL_ORDER = ["Ticker", "Best_Score", "Chart", "Timeframe", "Prezzo", "RSI", "Volume Ratio",
              "CH_Status", "CH_Score", "CH_Bars_Since", "CH_PriorRise_%",
              "DT_Status", "DT_Score", "DT_Bars_Since",
+             "DTZ_Status", "DTZ_Bars_Since",
              "Perf_1Y_%", "Perf_3Y_%", "Perf_5Y_%", "Run_Date"]
 ordered = [c for c in COL_ORDER if c in show.columns]
 extras = [c for c in show.columns if c not in ordered]
@@ -574,6 +579,9 @@ selection = st.dataframe(
         "Prezzo": st.column_config.NumberColumn("Price"),
         "CH_Score": st.column_config.NumberColumn("CH Score"),
         "DT_Score": st.column_config.NumberColumn("DT Score"),
+        "DTZ_Status": st.column_config.TextColumn(
+            "T2 Zone", help="Price touched the projected Top-2 zone (unconfirmed pivot)"),
+        "DTZ_Bars_Since": st.column_config.NumberColumn("Zone Bars"),
         "Perf_1Y_%": st.column_config.NumberColumn("Perf 1Y %", format="%.1f"),
         "Perf_3Y_%": st.column_config.NumberColumn("Perf 3Y %", format="%.1f"),
         "Perf_5Y_%": st.column_config.NumberColumn("Perf 5Y %", format="%.1f"),
