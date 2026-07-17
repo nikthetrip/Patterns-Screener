@@ -298,6 +298,72 @@ def fetch_financial_history(ticker: str) -> pd.DataFrame | None:
         return None
 
 
+# =====================================================
+# ETF DATA (yfinance funds_data + info)
+# =====================================================
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_etf_data(ticker: str) -> dict:
+    out = {
+        "name": None, "summary": None, "aum": None, "pe": None,
+        "expense_ratio": None, "top_holdings": None, "sector_weights": None,
+        "category": None, "error": None,
+    }
+    try:
+        import yfinance as yf
+        tk = yf.Ticker(ticker)
+
+        info = {}
+        for attempt in range(2):
+            try:
+                info = tk.info or {}
+                if info:
+                    break
+            except Exception:
+                time.sleep(1 + attempt)
+
+        out["name"] = info.get("longName") or info.get("shortName")
+        out["summary"] = info.get("longBusinessSummary") or info.get("description")
+        out["aum"] = info.get("totalAssets")
+        out["pe"] = info.get("trailingPE")
+        out["category"] = info.get("category")
+        er = info.get("netExpenseRatio")
+        if er is None:
+            er = info.get("annualReportExpenseRatio")
+        # Yahoo returns expense ratio sometimes as 0.35 (percent) sometimes 0.0035
+        if er is not None:
+            out["expense_ratio"] = er / 100 if er > 0.5 else er
+
+        try:
+            fd = tk.funds_data
+            if fd is not None:
+                try:
+                    th = fd.top_holdings
+                    if th is not None and not th.empty:
+                        out["top_holdings"] = th.head(10)
+                except Exception:
+                    pass
+                try:
+                    sw = fd.sector_weightings
+                    if sw:
+                        out["sector_weights"] = sw
+                except Exception:
+                    pass
+                if not out["summary"]:
+                    try:
+                        out["summary"] = fd.description
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        if not info and out["top_holdings"] is None:
+            out["error"] = "data unavailable"
+    except Exception as e:
+        out["error"] = str(e)
+    return out
+
+
 # ================= SIDEBAR =================
 
 st.sidebar.title("📊 Precision Patterns")
@@ -435,37 +501,111 @@ if sel is None:
 
 row = fdf[fdf["Ticker"] == sel].iloc[0]
 
-# ================= COMPANY INFO + FUNDAMENTALS =================
+# ================= INFO SECTION (Stocks vs ETFs) =================
 
 st.divider()
 
-with st.spinner(f"Loading {sel} data..."):
-    fund = fetch_fundamentals(sel)
+IS_ETF_UNIVERSE = source_name == "Sector ETFs"
 
-title_name = fund["name"] or sel
-st.subheader(f"🏢 {title_name}  ·  {sel}")
+if IS_ETF_UNIVERSE:
+    # ---------------- ETF DEDICATED SECTION ----------------
+    with st.spinner(f"Loading {sel} data..."):
+        etf = fetch_etf_data(sel)
 
-if fund["sector"] or fund["industry"]:
-    st.caption(" · ".join(x for x in [fund["sector"], fund["industry"]] if x))
+    title_name = etf["name"] or sel
+    st.subheader(f"🧺 {title_name}  ·  {sel}")
+    if etf["category"]:
+        st.caption(etf["category"])
 
-if fund["summary"]:
-    sentences = fund["summary"].split(". ")
-    short = ". ".join(sentences[:2]).strip()
-    if not short.endswith("."):
-        short += "."
-    st.markdown(short)
-    if len(sentences) > 2:
-        with st.expander("Full description"):
-            st.write(fund["summary"])
-elif fund["error"]:
-    st.caption(f"Company info currently unavailable ({fund['error']}).")
+    if etf["summary"]:
+        sentences = etf["summary"].split(". ")
+        short = ". ".join(sentences[:2]).strip()
+        if not short.endswith("."):
+            short += "."
+        st.markdown(short)
+        if len(sentences) > 2:
+            with st.expander("Full description"):
+                st.write(etf["summary"])
+    elif etf["error"]:
+        st.caption(f"ETF info currently unavailable ({etf['error']}).")
 
-if fund["is_fund"]:
-    m1, m2 = st.columns(2)
-    m1.metric("AUM / Market Cap", fmt_cap(fund["market_cap"]))
-    m2.metric("P/E (holdings)", fmt_num(fund["pe"]))
-    st.caption("Fund/ETF instrument: company-level fundamentals are not applicable.")
+    # --- ETF metrics: AUM, P/E, Expense ratio ---
+    e1, e2, e3 = st.columns(3)
+    e1.metric("AUM", fmt_cap(etf["aum"]))
+    e2.metric("P/E (holdings)", fmt_num(etf["pe"]),
+              help="Weighted trailing P/E of the underlying holdings")
+    e3.metric("Expense ratio", fmt_pct(etf["expense_ratio"], 2),
+              help="Annual fund operating expenses")
+
+    # --- Holdings & exposure ---
+    h1, h2 = st.columns(2)
+
+    with h1:
+        st.markdown("##### Top 10 holdings")
+        th = etf["top_holdings"]
+        if th is not None and len(th) > 0:
+            th_show = th.copy().reset_index()
+            # normalize column names across yfinance versions
+            cols = {c.lower(): c for c in th_show.columns}
+            pct_col = next((th_show[c] for c in th_show.columns
+                            if "percent" in c.lower() or "weight" in c.lower()), None)
+            if pct_col is not None:
+                th_show["Weight %"] = (pct_col * 100).round(2)
+            keep = [c for c in th_show.columns
+                    if c.lower() in ("symbol", "holding name", "name", "index")] +                    (["Weight %"] if "Weight %" in th_show.columns else [])
+            th_show = th_show[keep] if keep else th_show
+            st.dataframe(th_show, use_container_width=True, hide_index=True, height=390)
+        else:
+            st.caption("Holdings data not available for this ETF.")
+
+    with h2:
+        st.markdown("##### Sector exposure")
+        sw = etf["sector_weights"]
+        if sw:
+            sw_df = pd.DataFrame(
+                {"Sector": [k.replace("_", " ").title() for k in sw.keys()],
+                 "Weight %": [round(v * 100, 1) for v in sw.values()]}
+            ).sort_values("Weight %", ascending=True)
+            figsw = go.Figure(go.Bar(
+                x=sw_df["Weight %"], y=sw_df["Sector"], orientation="h",
+                marker_color="#5b7cfa",
+                text=sw_df["Weight %"].map(lambda v: f"{v}%"), textposition="outside",
+            ))
+            figsw.update_layout(height=390, margin=dict(l=10, r=40, t=10, b=10),
+                                xaxis_title="%")
+            st.plotly_chart(figsw, use_container_width=True)
+        else:
+            st.caption("Sector exposure not available for this ETF.")
+
+    st.caption("🌍 Geographic exposure is not available via free Yahoo Finance data — "
+               "see the etf.com page below for full country breakdown and the underlying index.")
+
+    st.link_button(f"📄 {sel} on etf.com (underlying index, exposure) ↗",
+                   f"https://www.etf.com/{sel}")
+
 else:
+    # ---------------- STOCK SECTION (unchanged) ----------------
+    with st.spinner(f"Loading {sel} data..."):
+        fund = fetch_fundamentals(sel)
+
+    title_name = fund["name"] or sel
+    st.subheader(f"🏢 {title_name}  ·  {sel}")
+
+    if fund["sector"] or fund["industry"]:
+        st.caption(" · ".join(x for x in [fund["sector"], fund["industry"]] if x))
+
+    if fund["summary"]:
+        sentences = fund["summary"].split(". ")
+        short = ". ".join(sentences[:2]).strip()
+        if not short.endswith("."):
+            short += "."
+        st.markdown(short)
+        if len(sentences) > 2:
+            with st.expander("Full description"):
+                st.write(fund["summary"])
+    elif fund["error"]:
+        st.caption(f"Company info currently unavailable ({fund['error']}).")
+
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Market Cap", fmt_cap(fund["market_cap"]))
     m2.metric("P/E (trailing)", fmt_num(fund["pe"]))
@@ -493,18 +633,15 @@ else:
     m12.metric("Next earnings", fund["next_earnings"] or "n/a",
                help="Next scheduled earnings report date (Yahoo Finance)")
 
-st.link_button("📄 Financial statements on TradingView ↗",
-               tv_financials_url(sel, fund["exchange"]))
+    st.link_button("📄 Financial statements on TradingView ↗",
+                   tv_financials_url(sel, fund["exchange"]))
 
-# ================= FINANCIAL HISTORY CHARTS =================
-
-if not fund["is_fund"]:
+    # ---- Financial history charts ----
     fh = fetch_financial_history(sel)
     if fh is not None and not fh.empty:
         st.markdown("##### 📊 Financial history (annual)")
         g1, g2 = st.columns(2)
 
-        # --- Chart 1: Revenue + Net Income (bars) + Net Margin % (line) ---
         with g1:
             fig1 = go.Figure()
             if "Revenue" in fh.columns:
@@ -527,7 +664,6 @@ if not fund["is_fund"]:
             )
             st.plotly_chart(fig1, use_container_width=True)
 
-        # --- Chart 2: Debt + Free Cash Flow (bars) ---
         with g2:
             fig2 = go.Figure()
             if "Debt" in fh.columns:
