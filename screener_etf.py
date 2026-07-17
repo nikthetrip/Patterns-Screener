@@ -628,7 +628,7 @@ for ticker in tickers:
 
     ch = detect_cup_handle(df)
     dt = detect_double_top(df)
-    dtz = detect_dt_zone_touch(df, recent_bars=1)
+    dtz = detect_dt_zone_touch(df, recent_bars=10_000)  # vivo finche' non invalidato; gli alert filtrano <=1
 
     if ch is None and dt is None and dtz is None:
         continue
