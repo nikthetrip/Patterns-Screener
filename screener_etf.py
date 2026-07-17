@@ -389,6 +389,85 @@ def detect_double_top(df):
     return None
 
 
+
+
+# ==============================================
+# DT ZONE TOUCH (modalita' ATR) — potenziale T2
+# prima della conferma del pivot
+# ==============================================
+
+def detect_dt_zone_touch(df, recent_bars=1):
+    if len(df) < MIN_SEP_BARS + PIV_LEN_DT + 5:
+        return None
+
+    high = df["High"].reset_index(drop=True)
+    low  = df["Low"].reset_index(drop=True)
+    close = df["Close"].reset_index(drop=True)
+    atr = df["ATR14"].reset_index(drop=True)
+    n = len(close)
+    last_idx = n - 1
+
+    pivots = pivot_highs(high, low, PIV_LEN_DT)
+    if not pivots:
+        return None
+
+    for i in range(len(pivots) - 1, -1, -1):
+        t1_idx, t1_val = pivots[i]
+        sep_now = last_idx - t1_idx
+        if sep_now < MIN_SEP_BARS:
+            continue
+        if sep_now > MAX_SEP_BARS:
+            break
+
+        atr_ref = atr.iloc[t1_idx]
+        if np.isnan(atr_ref) or atr_ref <= 0:
+            continue
+
+        if USE_APEX or USE_TREND:
+            lkb = min(TREND_LOOKBACK, t1_idx)
+            if lkb <= 0:
+                continue
+            prior_hi = high.iloc[t1_idx - lkb:t1_idx].max()
+            prior_lo = low.iloc[t1_idx - lkb:t1_idx].min()
+            if USE_APEX and t1_val < prior_hi:
+                continue
+            if USE_TREND and (t1_val - prior_lo) < TREND_RISE_ATR * atr_ref:
+                continue
+
+        zone_lo = t1_val - PEAK_TOL_ATR * atr_ref
+        zone_hi = t1_val + PEAK_TOL_ATR * atr_ref
+
+        if (close.iloc[t1_idx + 1:last_idx + 1] > zone_hi).any():
+            continue
+
+        touch_idx = None
+        for k in range(t1_idx + 1, last_idx + 1):
+            if high.iloc[k] >= zone_lo:
+                touch_idx = k
+                break
+        if touch_idx is None:
+            continue
+        if (last_idx - touch_idx) > recent_bars:
+            continue
+
+        mid_low = low.iloc[t1_idx + 1:touch_idx]
+        if mid_low.empty:
+            continue
+        valley = mid_low.min()
+        if (t1_val - valley) < MIN_VALLEY_ATR * atr_ref:
+            continue
+        if (touch_idx - t1_idx) < MIN_SEP_BARS:
+            continue
+
+        return {
+            "t1_val": t1_val, "zone_lo": zone_lo, "zone_hi": zone_hi,
+            "valley_pct": (t1_val - valley) / t1_val * 100,
+            "sep_bars": touch_idx - t1_idx,
+            "bars_since_touch": last_idx - touch_idx,
+        }
+    return None
+
+
 # ==============================================
 # BOOK SCORE
 # ==============================================
@@ -549,8 +628,9 @@ for ticker in tickers:
 
     ch = detect_cup_handle(df)
     dt = detect_double_top(df)
+    dtz = detect_dt_zone_touch(df, recent_bars=1)
 
-    if ch is None and dt is None:
+    if ch is None and dt is None and dtz is None:
         continue
 
     ch_score = score_cup_handle(df, ch)
@@ -586,6 +666,12 @@ for ticker in tickers:
         "DT_Valley_%": round(dt["valley_pct"], 1) if dt else None,
         "DT_Sep_Bars": dt["sep_bars"] if dt else None,
         "DT_Bars_Since": dt["bars_since"] if dt else None,
+
+        "DTZ_Status": "TOUCH" if dtz else None,
+        "DTZ_T1": round(dtz["t1_val"], 2) if dtz else None,
+        "DTZ_Valley_%": round(dtz["valley_pct"], 1) if dtz else None,
+        "DTZ_Sep_Bars": dtz["sep_bars"] if dtz else None,
+        "DTZ_Bars_Since": dtz["bars_since_touch"] if dtz else None,
 
         "Perf_1Y_%": perf_1y,
         "Perf_3Y_%": perf_3y,
