@@ -2,7 +2,16 @@ name: Run Screeners
 
 on:
   schedule:
-    - cron: "30 21 * * 1-5"   # 21:30 UTC, lun-ven (dopo la chiusura USA)
+    # Orari in UTC. Con l'ora legale italiana (CEST = UTC+2):
+    #   05:00 UTC = 07:00 Roma
+    #   13:35 UTC = 15:35 Roma
+    #   20:30 UTC = 22:30 Roma
+    # NOTA: da fine ottobre (ora solare, CET = UTC+1) questi run
+    # scatteranno alle 06:00 / 14:35 / 21:30 di Roma — per mantenere
+    # gli orari andranno spostati di +1h (06:00, 14:35, 21:30 UTC).
+    - cron: "0 5 * * 1-5"
+    - cron: "35 13 * * 1-5"
+    - cron: "30 20 * * 1-5"
   workflow_dispatch:            # lancio manuale dalla tab Actions
 
 jobs:
@@ -25,10 +34,17 @@ jobs:
       - name: Run stocks screener
         run: python screener_stocks.py
 
+      - name: Send Telegram alerts
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python send_alerts.py
+
       - name: Commit results
         run: |
           git config user.name "screener-bot"
           git config user.email "bot@users.noreply.github.com"
+          git pull --rebase origin main || true
           git add data/
-          git commit -m "Screener update $(date +'%Y-%m-%d')" || echo "No changes to commit"
+          git commit -m "Screener update $(date -u +'%Y-%m-%d %H:%M UTC')" || echo "No changes to commit"
           git push
