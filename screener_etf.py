@@ -498,7 +498,12 @@ def fetch_etf_info_row(ticker):
         if er is None:
             er = info.get("annualReportExpenseRatio")
         if er is not None:
-            row["expense_ratio"] = er / 100 if er > 0.5 else er
+            # Yahoo units are inconsistent: netExpenseRatio comes in percent
+            # points (0.38 = 0.38%), annualReportExpenseRatio in decimals
+            # (0.0038). Real-world ETF ERs are < 2% (decimal 0.02), so any
+            # value above that must be percent points -> convert to decimal.
+            er = float(er)
+            row["expense_ratio"] = er / 100 if er > 0.02 else er
 
         try:
             fd = tk.funds_data
