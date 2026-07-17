@@ -519,6 +519,129 @@ def score_double_top(df, dt):
     return round(earned * 100.0 / denom) if denom > 0 else 0
 
 
+
+
+# ==============================================
+# FONDAMENTALI — scaricati qui (IP GitHub, una
+# volta al giorno) e letti dalla dashboard via CSV
+# ==============================================
+
+import json
+
+def _safe_div(a, b):
+    try:
+        if a is None or b is None or pd.isna(a) or pd.isna(b) or b == 0:
+            return None
+        return a / b
+    except Exception:
+        return None
+
+
+def _find_row(df, names):
+    if df is None or getattr(df, "empty", True):
+        return None
+    for name in names:
+        if name in df.index:
+            return df.loc[name]
+    return None
+
+
+def fetch_fundamentals_row(ticker):
+    row = {"Ticker": ticker}
+    try:
+        tk = yf.Ticker(ticker)
+        info = {}
+        for attempt in range(3):
+            try:
+                info = tk.info or {}
+                if info:
+                    break
+            except Exception:
+                time.sleep(2 * (attempt + 1))
+        if not info:
+            return row
+
+        row["name"] = info.get("longName") or info.get("shortName")
+        row["sector"] = info.get("sector")
+        row["industry"] = info.get("industry")
+        row["summary"] = info.get("longBusinessSummary")
+        row["market_cap"] = info.get("marketCap")
+        row["pe"] = info.get("trailingPE")
+        row["fwd_pe"] = info.get("forwardPE")
+        row["ps"] = info.get("priceToSalesTrailing12Months")
+        row["roe"] = info.get("returnOnEquity")
+        row["exchange"] = info.get("exchange")
+
+        try:
+            cal = tk.calendar
+            ed = None
+            if isinstance(cal, dict):
+                ed = cal.get("Earnings Date")
+            if ed is not None:
+                if isinstance(ed, (list, tuple)) and len(ed) > 0:
+                    ed = ed[0]
+                row["next_earnings"] = str(pd.Timestamp(ed).date())
+        except Exception:
+            pass
+
+        try:
+            bs = tk.balance_sheet
+        except Exception:
+            bs = None
+        try:
+            cf = tk.cashflow
+        except Exception:
+            cf = None
+        try:
+            fin = tk.income_stmt
+        except Exception:
+            fin = None
+
+        equity = _find_row(bs, ["Stockholders Equity", "Total Stockholder Equity",
+                                "Common Stock Equity", "Total Equity Gross Minority Interest"])
+        assets = _find_row(bs, ["Total Assets"])
+        if equity is not None and assets is not None and len(equity) > 0 and len(assets) > 0:
+            row["equity_ratio"] = _safe_div(float(equity.iloc[0]), float(assets.iloc[0]))
+
+        ltd = _find_row(bs, ["Long Term Debt", "Long Term Debt And Capital Lease Obligation"])
+        if ltd is not None and len(ltd) > 0 and not pd.isna(ltd.iloc[0]):
+            row["lt_debt"] = float(ltd.iloc[0])
+
+        ebit = _find_row(fin, ["EBIT", "Operating Income"])
+        if ebit is not None and assets is not None and len(ebit) > 0 and len(assets) > 0:
+            row["earning_power"] = _safe_div(float(ebit.iloc[0]), float(assets.iloc[0]))
+
+        fcf_row = _find_row(cf, ["Free Cash Flow"])
+        fcf_now = None
+        if fcf_row is not None and len(fcf_row) > 0 and not pd.isna(fcf_row.iloc[0]):
+            fcf_now = float(fcf_row.iloc[0])
+            if len(fcf_row) > 1 and not pd.isna(fcf_row.iloc[1]) and fcf_row.iloc[1] > 0:
+                row["fcf_growth_yoy"] = (fcf_now - float(fcf_row.iloc[1])) / float(fcf_row.iloc[1])
+        if fcf_now is None:
+            fcf_now = info.get("freeCashflow")
+        row["fcf"] = fcf_now
+        row["fcf_yield"] = _safe_div(fcf_now, row.get("market_cap"))
+
+        # Storico annuale per i grafici (JSON)
+        revenue = _find_row(fin, ["Total Revenue", "Operating Revenue"])
+        net_inc = _find_row(fin, ["Net Income", "Net Income Common Stockholders"])
+        debt    = _find_row(bs, ["Total Debt", "Long Term Debt And Capital Lease Obligation", "Long Term Debt"])
+        hist = {}
+        for name, series in [("Revenue", revenue), ("NetIncome", net_inc),
+                             ("Debt", debt), ("FCF", fcf_row)]:
+            if series is not None:
+                s = series.dropna()
+                for dt_idx, val in s.items():
+                    y = pd.Timestamp(dt_idx).year
+                    hist.setdefault(y, {})[name] = float(val)
+        if hist:
+            row["fin_history"] = json.dumps(
+                [{"Year": y, **vals} for y, vals in sorted(hist.items())])
+    except Exception:
+        pass
+    return row
+
+
 # ==============================================
 # MOTORE PRINCIPALE — loop sui timeframes
 # ==============================================
@@ -604,5 +727,25 @@ for tf_name, cfg in TIMEFRAMES.items():
     out = f"data/stocks_{tf_name}.csv"
     results_df.to_csv(out, index=False)
     print(f"[{tf_name}] Salvato {out} — {len(results_df)} titoli con pattern.")
+
+# --- Fondamentali per i ticker con pattern (tutti i timeframe) ---
+seen = set()
+fund_rows = []
+for tf_name in TIMEFRAMES:
+    p = f"data/stocks_{tf_name}.csv"
+    if os.path.exists(p):
+        try:
+            t_df = pd.read_csv(p)
+            seen.update(t_df["Ticker"].dropna().tolist())
+        except Exception:
+            pass
+
+print(f"\nScarico fondamentali per {len(seen)} ticker con pattern...")
+for tkr in sorted(seen):
+    fund_rows.append(fetch_fundamentals_row(tkr))
+    time.sleep(0.3)
+
+pd.DataFrame(fund_rows).to_csv("data/fundamentals_stocks.csv", index=False)
+print(f"Salvato data/fundamentals_stocks.csv ({len(fund_rows)} righe).")
 
 print("\nAnalisi completata su tutti i timeframe.")
